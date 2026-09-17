@@ -1,0 +1,16 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Playwright & Browser Session
+deepseek_user_data/
+
+# Logs
+*.log
+server.log

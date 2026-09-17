@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+playwright
+python-dotenv
+asyncio
+InquirerPy
+playwright_stealth
