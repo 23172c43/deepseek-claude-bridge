@@ -1,4 +1,7 @@
 import subprocess
+import sys
+
+import launcher
 
 from launcher import stop_process
 
@@ -16,7 +19,7 @@ class FakeProcess:
     def terminate(self):
         self.terminated = True
 
-    def wait(self, timeout):
+    def wait(self, timeout=None):
         if self.timeout_once:
             self.timeout_once = False
             raise subprocess.TimeoutExpired("fake", timeout)
@@ -41,3 +44,35 @@ def test_stop_process_kills_after_timeout():
     assert process.terminated
     assert process.killed
     assert process.poll() == 0
+
+
+def test_main_starts_only_shared_server(monkeypatch, tmp_path):
+    captured = {}
+    process = FakeProcess()
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr(launcher, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "is_port_open", lambda port: False)
+    monkeypatch.setattr(
+        launcher,
+        "get_server_health",
+        lambda port, timeout=2.0: {
+            "bridge": "deepseek-claude-agent",
+            "browser_ready": True,
+        },
+    )
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["launcher.py", "--profile", str(tmp_path)],
+    )
+
+    assert launcher.main() == 0
+    assert captured["command"][1:4] == ["-m", "uvicorn", "app.server:app"]
+    assert "claude" not in captured["command"]
+    assert captured["kwargs"]["cwd"] == tmp_path

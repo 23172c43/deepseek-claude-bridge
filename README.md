@@ -66,29 +66,61 @@ python login.py --channel chrome
 
 Không sao chép hoặc chia sẻ thư mục profile: nó chứa cookie đăng nhập.
 
-## Chạy
+## Cấu hình Claude Code một lần
+
+Claude Code hỗ trợ cấu hình biến môi trường cho mọi project qua file người dùng
+`~/.claude/settings.json`. Nếu file đã tồn tại, hãy gộp hai biến dưới đây vào
+khóa `env` thay vì ghi đè các cài đặt khác:
+
+~~~json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8000",
+    "ANTHROPIC_AUTH_TOKEN": "sk-ant-dummy-local"
+  }
+}
+~~~
+
+Mẫu tương tự có trong `settings.example.json`. Cấu hình cấp người dùng này được
+Claude Code đọc ở mọi thư mục, không cần `export` lại trong từng terminal.
+
+## Chạy server
 
 ~~~bash
 python launcher.py
 ~~~
 
-Launcher:
+Launcher chỉ thực hiện các việc sau:
 
 1. Kiểm tra port chưa bị process khác chiếm.
-2. Khởi động Uvicorn chỉ trên 127.0.0.1.
-3. Chờ browser thực sự sẵn sàng.
-4. Chạy Claude Code với ANTHROPIC_BASE_URL trỏ về bridge.
-5. Dừng và chờ server thoát khi Claude kết thúc.
+2. Khởi động Uvicorn trên `127.0.0.1:8000`.
+3. Khởi động browser DeepSeek và chờ phiên đăng nhập sẵn sàng.
+4. Giữ API server chạy cho tới khi nhấn `Ctrl+C`.
 
-Chạy nhiều launcher bằng port và profile riêng:
+Launcher **không mở Claude Code**. Log được nối thêm vào `server_8000.log`.
+
+## Dùng Claude ở mọi thư mục và nhiều cửa sổ
+
+Sau khi server đã sẵn sàng, mở terminal bất kỳ:
 
 ~~~bash
-python launcher.py --port 8001 --profile ./deepseek_user_data_2
+cd ~/Projects/project-a
+claude
 ~~~
 
-Log được nối thêm vào server_<port>.log, không ghi đè log cũ.
+Có thể mở thêm terminal khác cùng lúc:
 
-## Cấu hình
+~~~bash
+cd ~/Projects/project-b
+claude
+~~~
+
+Mọi cửa sổ dùng chung endpoint trong `~/.claude/settings.json`. Mỗi request mang
+theo đầy đủ lịch sử của cửa sổ đó và bridge tạo một chat DeepSeek mới, nên các
+cuộc hội thoại không bị trộn. Một browser xử lý tuần tự; request đến đồng thời
+được xếp hàng thay vì chạy song song.
+
+## Cấu hình server
 
 Các biến môi trường hỗ trợ:
 
@@ -103,14 +135,8 @@ Các biến môi trường hỗ trợ:
 | RESPONSE_STABLE_SECONDS | 5 | Thời gian text phải ổn định |
 | MAX_REQUEST_BYTES | 2097152 | Kích thước JSON request tối đa |
 
-Ví dụ bật khóa cục bộ:
-
-~~~bash
-export BRIDGE_API_KEY='replace-with-a-random-local-secret'
-python launcher.py
-~~~
-
-Launcher tự chuyển khóa này thành ANTHROPIC_API_KEY cho Claude Code.
+Nếu đặt `BRIDGE_API_KEY`, giá trị `ANTHROPIC_AUTH_TOKEN` trong
+`~/.claude/settings.json` phải giống khóa đó.
 
 ## Phạm vi tương thích
 
@@ -131,8 +157,9 @@ hạn chính xác.
 │   ├── browser.py       # Vòng đời Playwright và đọc phản hồi DeepSeek
 │   └── server.py        # Adapter HTTP, prompt, parser và SSE
 ├── tests/               # Test hồi quy
-├── launcher.py          # Khởi động server và Claude Code
+├── launcher.py          # Khởi động API server dùng chung
 ├── login.py             # Tạo profile đăng nhập
+├── settings.example.json # Mẫu cấu hình Claude Code toàn máy
 ├── requirements.txt
 └── requirements-dev.txt
 ~~~

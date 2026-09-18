@@ -46,3 +46,25 @@ def test_old_response_is_never_returned_as_new():
         raise AssertionError("Expected BrowserResponseTimeout")
 
     asyncio.run(run())
+
+
+def test_conversations_are_serialized_for_multiple_clients():
+    async def run():
+        bridge = BrowserBridge("./unused-test-profile")
+        order = []
+
+        async def client(name):
+            async with bridge.conversation(reset=False):
+                order.append(f"{name}:start")
+                await asyncio.sleep(0.01)
+                order.append(f"{name}:end")
+
+        await asyncio.gather(client("first"), client("second"))
+        assert order == [
+            "first:start",
+            "first:end",
+            "second:start",
+            "second:end",
+        ]
+
+    asyncio.run(run())

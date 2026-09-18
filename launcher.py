@@ -2,13 +2,15 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shutil
 import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+
+
+PROJECT_DIR = Path(__file__).resolve().parent
 
 
 def is_port_open(port, timeout=0.3):
@@ -52,14 +54,14 @@ def stop_process(process, timeout=8):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Khởi động DeepSeek-Claude Bridge. Mỗi launcher dùng một port/profile riêng; "
-            "mỗi API request bên trong launcher được cô lập bằng một chat mới."
+            "Khởi động DeepSeek-Claude Bridge dưới dạng API server dùng chung. "
+            "Claude Code được mở riêng ở bất kỳ thư mục nào."
         )
     )
     parser.add_argument("--port", type=int, default=8000, help="Port server (mặc định 8000)")
     parser.add_argument(
         "--profile",
-        default="./deepseek_user_data",
+        default=str(PROJECT_DIR / "deepseek_user_data"),
         help="Thư mục profile Chromium đã đăng nhập.",
     )
     parser.add_argument(
@@ -84,11 +86,6 @@ def main():
         )
         return 1
 
-    claude_executable = shutil.which("claude")
-    if not claude_executable:
-        print("❌ Không tìm thấy Claude Code CLI trong PATH.")
-        return 1
-
     if is_port_open(port):
         if is_our_server(port):
             print(
@@ -99,7 +96,7 @@ def main():
             print(f"❌ Port {port} đang bị tiến trình khác chiếm.")
         return 1
 
-    log_path = Path(f"server_{port}.log").resolve()
+    log_path = PROJECT_DIR / f"server_{port}.log"
     print(f"🔄 Khởi động bridge (port={port}, profile={profile_dir})...")
     print(f"📝 Log: {log_path}")
 
@@ -121,6 +118,7 @@ def main():
             stdout=log_file,
             stderr=log_file,
             env=env,
+            cwd=PROJECT_DIR,
         )
 
         print("⏳ Đang chờ server và phiên đăng nhập sẵn sàng...")
@@ -149,18 +147,11 @@ def main():
             return 1
 
         print(f"✅ Bridge sẵn sàng tại http://127.0.0.1:{port}")
-        print("🚀 Bàn giao quyền điều khiển cho Claude CLI...")
-
-        client_env = os.environ.copy()
-        client_env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{port}"
-        if os.environ.get("BRIDGE_API_KEY"):
-            client_env["ANTHROPIC_API_KEY"] = os.environ["BRIDGE_API_KEY"]
-        else:
-            client_env.setdefault("ANTHROPIC_API_KEY", "sk-ant-dummy-local")
+        print("🌐 Server đang chạy độc lập. Có thể mở nhiều cửa sổ Claude ở mọi thư mục.")
+        print("🛑 Nhấn Ctrl+C để dừng server.")
 
         try:
-            completed = subprocess.run([claude_executable], env=client_env, check=False)
-            return completed.returncode
+            return server_process.wait()
         except KeyboardInterrupt:
             return 130
         finally:

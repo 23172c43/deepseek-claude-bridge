@@ -17,8 +17,8 @@ from app.browser import (
     BrowserResponseTimeout,
 )
 
-# Mỗi phiên launcher.py set biến này trỏ tới profile Chromium riêng, để chạy
-# nhiều cửa sổ Claude Code song song mà không bị trộn hội thoại DeepSeek.
+# Một server dùng chung một profile Chromium. Nhiều cửa sổ Claude Code có thể
+# cùng gọi server; BrowserBridge tuần tự hóa request và reset chat cho từng lượt.
 _PROFILE_DIR = os.environ.get("DEEPSEEK_PROFILE_DIR", "./deepseek_user_data")
 bridge = BrowserBridge(user_data_dir=_PROFILE_DIR)
 
