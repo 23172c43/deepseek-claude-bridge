@@ -49,6 +49,20 @@ def test_build_prompt_keeps_complete_history_and_schema():
     assert "file_path" in prompt
 
 
+def test_mid_conversation_system_message_is_preserved_as_instruction():
+    messages = [
+        {"role": "user", "content": "inspect the project"},
+        {"role": "system", "content": "Use concise output from now on."},
+        {"role": "assistant", "content": "Understood."},
+        {"role": "user", "content": "continue"},
+    ]
+    assert _validate_request_body({"messages": messages}) is None
+    prompt = build_prompt(messages, [], "Initial system prompt")
+    assert "[SYSTEM INSTRUCTION AT TURN 1]" in prompt
+    assert "Use concise output from now on." in prompt
+    assert "cùng mức ưu tiên" in prompt
+
+
 def test_extract_tool_call_and_coerce_schema_types():
     tools = [
         {
