@@ -60,10 +60,7 @@ class BrowserBridge:
         os.environ.get("SHUTDOWN_TIMEOUT_SECONDS", "5")
     )
 
-    # Speed-first default. Set DEEPTHINK_ENABLED=1 when you explicitly want it.
     DEEPTHINK_ENABLED = os.environ.get("DEEPTHINK_ENABLED", "0") != "0"
-
-    # New-chat UI is attempted first. Full navigation is only a fallback.
     NEW_CHAT_VIA_UI = os.environ.get("NEW_CHAT_VIA_UI", "1") != "0"
 
     def __init__(self, user_data_dir: str = "./deepseek_user_data"):
@@ -71,7 +68,6 @@ class BrowserBridge:
         self.browser_context = None
         self.page = None
 
-        # All requests, including repair turns, are serialized.
         self.lock = asyncio.Lock()
 
         self._request_count = 0
@@ -110,7 +106,6 @@ class BrowserBridge:
             raise BrowserInputUnavailableError(message)
 
     async def ensure_deepthink_enabled(self):
-        """Best-effort DeepThink toggle; failure never kills the bridge."""
         if (
             not self.DEEPTHINK_ENABLED
             or not self.page
@@ -154,6 +149,7 @@ class BrowserBridge:
             chat_input = self.page.locator(
                 self.CHAT_INPUT_SELECTOR
             ).first
+
             await chat_input.wait_for(
                 state="visible",
                 timeout=timeout_ms,
@@ -193,7 +189,6 @@ class BrowserBridge:
             ) from exc
 
     async def _fill_chat_input(self, chat_input, message: str):
-        """Fill React textarea, with a native-setter fallback."""
         try:
             await chat_input.fill(
                 message,
@@ -272,6 +267,7 @@ class BrowserBridge:
             launch_args = [
                 "--disable-blink-features=AutomationControlled"
             ]
+
             if os.environ.get("BROWSER_NO_SANDBOX") == "1":
                 launch_args.append("--no-sandbox")
 
@@ -300,6 +296,7 @@ class BrowserBridge:
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
+
             await self._wait_for_chat_input()
 
             self.ready = True
@@ -332,6 +329,7 @@ class BrowserBridge:
             chat_input = self.page.locator(
                 self.CHAT_INPUT_SELECTOR
             ).first
+
             await chat_input.wait_for(
                 state="visible",
                 timeout=timeout_ms,
@@ -421,13 +419,14 @@ class BrowserBridge:
                         await candidate.is_visible()
                         and await candidate.is_enabled()
                     ):
-                        await candidate.click(
-                            timeout=1500
-                        )
+                        await candidate.click(timeout=1500)
+
                         await self.page.wait_for_timeout(150)
+
                         await self._wait_for_chat_input(
                             timeout_ms=5000
                         )
+
                         return True
 
             except Exception:
@@ -436,7 +435,6 @@ class BrowserBridge:
         return False
 
     async def start_new_conversation(self):
-        """Prefer UI reset; navigation is only a fallback."""
         self._raise_during_cooldown()
 
         if not self.page or self.page.is_closed():
@@ -451,13 +449,14 @@ class BrowserBridge:
                 self.last_error = None
                 return
 
-            # Fallback for UI versions where no New Chat button is detectable.
             await self.page.goto(
                 self.CHAT_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
+
             await self._wait_for_chat_input()
+
             self.ready = True
             self.last_error = None
 
@@ -480,7 +479,6 @@ class BrowserBridge:
             yield self
 
     async def send_message_to_deepseek(self, message: str) -> str:
-        """Send one message and return only the newly generated response."""
         if not self.lock.locked():
             raise RuntimeError(
                 "send_message_to_deepseek phải chạy bên trong conversation()."
@@ -494,6 +492,7 @@ class BrowserBridge:
         self._raise_during_cooldown()
 
         self._request_count += 1
+
         if (
             self._request_count % self.DEEPTHINK_RECHECK_EVERY == 0
         ):
@@ -507,7 +506,9 @@ class BrowserBridge:
             old_responses = await self.page.query_selector_all(
                 self.RESPONSE_SELECTOR
             )
+
             old_count = len(old_responses)
+
             baseline_text = (
                 await old_responses[-1].inner_text()
                 if old_responses
@@ -519,6 +520,7 @@ class BrowserBridge:
                     chat_input,
                     message,
                 )
+
                 await chat_input.press(
                     "Enter",
                     timeout=self.INPUT_ACTION_TIMEOUT_MS,
@@ -536,11 +538,13 @@ class BrowserBridge:
                         "🔄 Ô chat thay đổi trạng thái; "
                         "tạo lại conversation và thử một lần..."
                     )
+
                     try:
                         await self.start_new_conversation()
                     except BrowserBridgeError as recovery_exc:
                         input_error = recovery_exc
                         break
+
                     continue
 
                 break
@@ -553,7 +557,9 @@ class BrowserBridge:
                 "DeepSeek không cho phép nhập hoặc gửi tin nhắn; "
                 "hãy kiểm tra phiên đăng nhập và giao diện web."
             )
+
             self._mark_input_unavailable(error_message)
+
             raise BrowserInputUnavailableError(
                 error_message
             ) from input_error
@@ -620,7 +626,10 @@ class BrowserBridge:
                 )
 
             await asyncio.sleep(
-                min(0.2, max(self.POLL_INTERVAL_SECONDS, 0.05))
+                min(
+                    0.2,
+                    max(self.POLL_INTERVAL_SECONDS, 0.05),
+                )
             )
 
             try:
@@ -630,6 +639,7 @@ class BrowserBridge:
                 responses = await self.page.query_selector_all(
                     self.RESPONSE_SELECTOR
                 )
+
                 if not responses:
                     raise BrowserResponseTimeout(
                         "Bubble phản hồi biến mất trước khi hoàn thành."

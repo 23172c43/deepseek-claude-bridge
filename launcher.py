@@ -1,4 +1,3 @@
-
 import argparse
 import json
 import os
@@ -9,7 +8,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -44,6 +42,7 @@ def is_our_server(port, timeout=2.0):
 def stop_process(process, timeout=8):
     if process is None or process.poll() is not None:
         return
+        
     process.terminate()
     try:
         process.wait(timeout=timeout)
@@ -59,27 +58,38 @@ def main():
             "Claude Code được mở riêng ở bất kỳ thư mục nào."
         )
     )
-    parser.add_argument("--port", type=int, default=8000, help="Port server (mặc định 8000)")
+    
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port server (mặc định 8000)",
+    )
+
     parser.add_argument(
         "--profile",
         default=str(PROJECT_DIR / "deepseek_user_data"),
         help="Thư mục profile Chromium đã đăng nhập.",
     )
+
     parser.add_argument(
         "--startup-timeout",
         type=float,
         default=60,
         help="Số giây tối đa chờ browser và server sẵn sàng.",
     )
+
     args = parser.parse_args()
 
-    if not 1 <= args.port <= 65535:
+    if not (1 <= args.port <= 65535):
         parser.error("--port phải nằm trong khoảng 1..65535")
+
     if args.startup_timeout <= 0:
         parser.error("--startup-timeout phải lớn hơn 0")
 
     port = args.port
     profile_dir = Path(args.profile).expanduser().resolve()
+
     if not profile_dir.is_dir():
         print(
             f"❌ Không tìm thấy profile '{profile_dir}'. "
@@ -98,13 +108,16 @@ def main():
         return 1
 
     log_path = PROJECT_DIR / f"server_{port}.log"
+
     print(f"🔄 Khởi động bridge (port={port}, profile={profile_dir})...")
     print(f"📝 Log: {log_path}")
 
     server_process = None
+
     with log_path.open("a", encoding="utf-8", buffering=1) as log_file:
         env = os.environ.copy()
         env["DEEPSEEK_PROFILE_DIR"] = str(profile_dir)
+
         server_process = subprocess.Popen(
             [
                 sys.executable,
@@ -123,32 +136,43 @@ def main():
         )
 
         print("⏳ Đang chờ server và phiên đăng nhập sẵn sàng...")
+
         deadline = time.monotonic() + args.startup_timeout
         health = None
+
         while time.monotonic() < deadline:
             return_code = server_process.poll()
+
             if return_code is not None:
                 print(
                     f"❌ Server dừng sớm với mã {return_code}. "
                     f"Xem log tại {log_path}."
                 )
                 return return_code or 1
+
             health = get_server_health(port)
+
             if health and health.get("browser_ready"):
                 break
+
             time.sleep(0.5)
         else:
             detail = (health or {}).get("last_error")
+
             if detail:
                 print(f"❌ Browser chưa sẵn sàng: {detail}")
             else:
                 print(f"❌ Server không sẵn sàng sau {args.startup_timeout:.0f}s.")
+
             print(f"Xem log tại {log_path}.")
             stop_process(server_process)
             return 1
 
         print(f"✅ Bridge sẵn sàng tại http://127.0.0.1:{port}")
-        print("🌐 Server đang chạy độc lập. Có thể mở nhiều cửa sổ Claude ở mọi thư mục.")
+        print(
+            "🌐 Server đang chạy độc lập. "
+            "Có thể mở nhiều cửa sổ Claude ở mọi thư mục."
+        )
         print("🛑 Nhấn Ctrl+C để dừng server.")
 
         try:
@@ -163,5 +187,3 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
