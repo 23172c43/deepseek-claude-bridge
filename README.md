@@ -130,6 +130,10 @@ Các biến môi trường hỗ trợ:
 | BROWSER_HEADLESS | 1 | Đặt 0 để hiện browser |
 | BROWSER_NO_SANDBOX | rỗng | Chỉ đặt 1 trong container tin cậy |
 | DEEPSEEK_CHAT_URL | https://chat.deepseek.com | URL giao diện chat |
+| DEEPTHINK_ENABLED | 1 | Đặt 0 để không tự bật DeepThink, giúp giảm tải khi máy yếu |
+| INPUT_ACTION_TIMEOUT_MS | 10000 | Thời gian tối đa chờ ô chat cho phép nhập/gửi |
+| FAILURE_COOLDOWN_SECONDS | 30 | Thời gian ngừng thao tác browser sau lỗi nhập liệu để chặn retry dồn dập |
+| SHUTDOWN_TIMEOUT_SECONDS | 5 | Thời gian tối đa dọn từng thành phần Playwright khi tắt |
 | RESPONSE_START_TIMEOUT | 30 | Giây chờ bubble phản hồi mới |
 | RESPONSE_COMPLETE_TIMEOUT | 120 | Giây chờ phản hồi hoàn tất |
 | RESPONSE_STABLE_SECONDS | 5 | Thời gian text phải ổn định |

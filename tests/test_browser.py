@@ -1,19 +1,27 @@
 import asyncio
 
-from app.browser import BrowserBridge, BrowserResponseTimeout
+from app.browser import (
+    BrowserBridge,
+    BrowserInputUnavailableError,
+    BrowserResponseTimeout,
+)
 
 
 class FakeElement:
-    def __init__(self, text):
+    def __init__(self, text, editable=True):
         self.text = text
+        self.editable = editable
 
     async def inner_text(self):
         return self.text
 
-    async def fill(self, value):
+    async def is_editable(self):
+        return self.editable
+
+    async def fill(self, value, **kwargs):
         self.text = value
 
-    async def press(self, key):
+    async def press(self, key, **kwargs):
         return None
 
 
@@ -66,5 +74,42 @@ def test_conversations_are_serialized_for_multiple_clients():
             "second:start",
             "second:end",
         ]
+
+    asyncio.run(run())
+
+
+def test_non_editable_input_starts_cooldown():
+    async def run():
+        bridge = BrowserBridge("./unused-test-profile")
+        bridge.page = FakePage()
+        bridge.page.input.editable = False
+        bridge.FAILURE_COOLDOWN_SECONDS = 5
+
+        try:
+            await bridge._wait_for_chat_input(timeout_ms=1)
+        except BrowserInputUnavailableError:
+            assert bridge.cooldown_error()
+            return
+        raise AssertionError("Expected BrowserInputUnavailableError")
+
+    asyncio.run(run())
+
+
+def test_close_suppresses_already_closed_driver_errors():
+    class BrokenContext:
+        async def close(self):
+            raise RuntimeError("Connection closed")
+
+    class BrokenPlaywright:
+        async def stop(self):
+            raise RuntimeError("EPIPE")
+
+    async def run():
+        bridge = BrowserBridge("./unused-test-profile")
+        bridge.browser_context = BrokenContext()
+        bridge.playwright = BrokenPlaywright()
+        await bridge.close()
+        assert bridge.browser_context is None
+        assert bridge.playwright is None
 
     asyncio.run(run())

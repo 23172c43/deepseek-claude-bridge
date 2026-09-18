@@ -1,8 +1,10 @@
 import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
@@ -14,6 +16,10 @@ class BrowserBridgeError(RuntimeError):
 
 class BrowserNotReadyError(BrowserBridgeError):
     pass
+
+
+class BrowserInputUnavailableError(BrowserNotReadyError):
+    """The web chat is visible but cannot currently accept a message."""
 
 
 class BrowserResponseTimeout(BrowserBridgeError):
@@ -28,6 +34,10 @@ class BrowserBridge:
     RESPONSE_START_TIMEOUT = float(os.environ.get("RESPONSE_START_TIMEOUT", "30"))
     RESPONSE_COMPLETE_TIMEOUT = float(os.environ.get("RESPONSE_COMPLETE_TIMEOUT", "120"))
     STABLE_SECONDS = float(os.environ.get("RESPONSE_STABLE_SECONDS", "5"))
+    INPUT_ACTION_TIMEOUT_MS = int(os.environ.get("INPUT_ACTION_TIMEOUT_MS", "10000"))
+    FAILURE_COOLDOWN_SECONDS = float(os.environ.get("FAILURE_COOLDOWN_SECONDS", "30"))
+    SHUTDOWN_TIMEOUT_SECONDS = float(os.environ.get("SHUTDOWN_TIMEOUT_SECONDS", "5"))
+    DEEPTHINK_ENABLED = os.environ.get("DEEPTHINK_ENABLED", "1") != "0"
 
     def __init__(self, user_data_dir: str = "./deepseek_user_data"):
         self.playwright = None
@@ -38,10 +48,31 @@ class BrowserBridge:
         self.user_data_dir = str(Path(user_data_dir).expanduser().resolve())
         self.ready = False
         self.last_error = None
+        self._unavailable_until = 0.0
+
+    def cooldown_error(self):
+        remaining = self._unavailable_until - time.monotonic()
+        if remaining <= 0:
+            return None
+        detail = self.last_error or "Ô chat DeepSeek tạm thời không nhận nội dung."
+        return f"{detail} Bridge tạm nghỉ {remaining:.0f}s để tránh retry làm máy quá tải."
+
+    def _mark_input_unavailable(self, message: str):
+        self.ready = False
+        self.last_error = message
+        self._unavailable_until = max(
+            self._unavailable_until,
+            time.monotonic() + self.FAILURE_COOLDOWN_SECONDS,
+        )
+
+    def _raise_during_cooldown(self):
+        message = self.cooldown_error()
+        if message:
+            raise BrowserInputUnavailableError(message)
 
     async def ensure_deepthink_enabled(self):
         """Best-effort toggle; failure here must not mark the browser unhealthy."""
-        if not self.page or self.page.is_closed():
+        if not self.DEEPTHINK_ENABLED or not self.page or self.page.is_closed():
             return
         try:
             deepthink_btn = self.page.locator(
@@ -58,16 +89,32 @@ class BrowserBridge:
     async def _wait_for_chat_input(self, timeout_ms: int = 15000):
         if not self.page or self.page.is_closed():
             raise BrowserNotReadyError("Trang DeepSeek chưa được khởi tạo hoặc đã đóng.")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_ms / 1000
         try:
-            return await self.page.wait_for_selector(
+            chat_input = await self.page.wait_for_selector(
                 self.CHAT_INPUT_SELECTOR,
                 state="visible",
                 timeout=timeout_ms,
             )
+            while loop.time() < deadline:
+                try:
+                    if await chat_input.is_editable():
+                        return chat_input
+                except PlaywrightError:
+                    # DeepSeek can replace the textarea while hydrating the page.
+                    remaining_ms = max(int((deadline - loop.time()) * 1000), 1)
+                    chat_input = await self.page.wait_for_selector(
+                        self.CHAT_INPUT_SELECTOR,
+                        state="visible",
+                        timeout=min(remaining_ms, 1000),
+                    )
+                await asyncio.sleep(0.1)
+            raise PlaywrightTimeoutError("DeepSeek chat input is not editable.")
         except PlaywrightTimeoutError as exc:
-            self.ready = False
+            self._mark_input_unavailable("DeepSeek chat input is unavailable.")
             self.last_error = "Không tìm thấy khung chat; phiên đăng nhập có thể đã hết hạn."
-            raise BrowserNotReadyError(self.last_error) from exc
+            raise BrowserInputUnavailableError(self.last_error) from exc
 
     async def initialize(self):
         print("Khởi động Playwright ẩn...")
@@ -103,14 +150,21 @@ class BrowserBridge:
             raise BrowserNotReadyError(f"Không thể khởi tạo trình duyệt: {exc}") from exc
 
     async def check_ready(self, timeout_ms: int = 750) -> bool:
+        if self.cooldown_error():
+            return False
+        if self.lock.locked():
+            return self.ready
         if not self.page or self.page.is_closed():
             return False
         try:
-            await self.page.wait_for_selector(
+            chat_input = await self.page.wait_for_selector(
                 self.CHAT_INPUT_SELECTOR,
                 state="visible",
                 timeout=timeout_ms,
             )
+            if not await chat_input.is_editable():
+                self._mark_input_unavailable("DeepSeek chat input is not editable.")
+                return False
             self.ready = True
             self.last_error = None
             return True
@@ -125,16 +179,27 @@ class BrowserBridge:
         self.browser_context = None
         self.playwright = None
         self.page = None
-        try:
-            if context:
-                await context.close()
-        finally:
-            if playwright:
-                await playwright.stop()
+        if context:
+            try:
+                await asyncio.wait_for(
+                    context.close(),
+                    timeout=self.SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                print(f"⚠️ Chromium đã đóng trước khi dọn context xong: {exc}")
+        if playwright:
+            try:
+                await asyncio.wait_for(
+                    playwright.stop(),
+                    timeout=self.SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                print(f"⚠️ Playwright driver đã đóng trong lúc dọn dẹp: {exc}")
 
     async def start_new_conversation(self):
         """Reset hidden web-chat state; the API request supplies the complete transcript."""
-        if not await self.check_ready():
+        self._raise_during_cooldown()
+        if not self.page or self.page.is_closed():
             raise BrowserNotReadyError(self.last_error or "Trình duyệt chưa sẵn sàng.")
         try:
             await self.page.goto(self.CHAT_URL, wait_until="domcontentloaded", timeout=30000)
@@ -161,6 +226,7 @@ class BrowserBridge:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("Nội dung gửi đến DeepSeek không được rỗng.")
 
+        self._raise_during_cooldown()
         self._request_count += 1
         if self._request_count % self.DEEPTHINK_RECHECK_EVERY == 0:
             await self.ensure_deepthink_enabled()
@@ -170,8 +236,16 @@ class BrowserBridge:
         old_count = len(old_responses)
         baseline_text = await old_responses[-1].inner_text() if old_responses else None
 
-        await chat_input.fill(message)
-        await chat_input.press("Enter")
+        try:
+            await chat_input.fill(message, timeout=self.INPUT_ACTION_TIMEOUT_MS)
+            await chat_input.press("Enter", timeout=self.INPUT_ACTION_TIMEOUT_MS)
+        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+            error_message = (
+                "DeepSeek không cho phép nhập hoặc gửi tin nhắn trong thời gian chờ; "
+                "hãy kiểm tra phiên đăng nhập và giao diện web."
+            )
+            self._mark_input_unavailable(error_message)
+            raise BrowserInputUnavailableError(error_message) from exc
         print("⏳ Đang đợi DeepSeek bắt đầu trả lời...")
 
         loop = asyncio.get_running_loop()

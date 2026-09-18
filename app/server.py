@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator
 from app.browser import (
     BrowserBridge,
     BrowserBridgeError,
+    BrowserInputUnavailableError,
     BrowserNotReadyError,
     BrowserResponseTimeout,
 )
@@ -809,13 +810,20 @@ async def anthropic_adapter(request: Request):
     body, error = await _read_json_body(request)
     if error:
         return error
+    cooldown_error = bridge.cooldown_error()
+    if cooldown_error:
+        return _error_response(cooldown_error, 424, "api_error")
 
     if not body.get("stream", False):
         try:
             result = await _process_request(body)
         except BrowserResponseTimeout as exc:
             return _error_response(str(exc), 504, "timeout_error")
+        except BrowserInputUnavailableError as exc:
+            return _error_response(str(exc), 424, "api_error")
         except BrowserNotReadyError as exc:
+            if bridge.cooldown_error():
+                return _error_response(str(exc), 424, "api_error")
             return _error_response(str(exc), 503, "service_unavailable_error")
         except BrowserBridgeError as exc:
             return _error_response(str(exc), 502, "api_error")
