@@ -1,43 +1,83 @@
+import argparse
 import asyncio
-from playwright.async_api import async_playwright
-# Dùng class Stealth mới thay cho stealth_async cũ
-from playwright_stealth import Stealth 
+import os
+from contextlib import suppress
+from pathlib import Path
+from typing import Optional
 
-async def run_login():
-    print("🚀 Khởi tạo trình duyệt để đăng nhập...")
-    async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir="./deepseek_user_data",
-            headless=False, # Mở giao diện (UI) để tự tay thao tác
-            channel="chrome",
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox"
-            ]
-        )
-        
-        # Áp dụng Stealth vào context bằng cú pháp mới của bản 2.x
-        await Stealth().apply_stealth_async(context)
-        
-        page = context.pages[0] if context.pages else await context.new_page()
-        
-        print("🌐 Đang mở trang web DeepSeek...")
-        await page.goto("https://chat.deepseek.com")
-        
-        print("\n" + "="*70)
-        print("🛑 DỪNG LẠI VÀ CHÚ Ý 🛑")
-        print("1. Hãy thao tác trên cửa sổ trình duyệt vừa mở để đăng nhập vào tài khoản DeepSeek.")
-        print("2. Giải mã Captcha (nếu có) và chờ đến khi nhìn thấy giao diện khung chat xuất hiện.")
-        print("3. TUYỆT ĐỐI KHÔNG TỰ ĐÓNG TRÌNH DUYỆT BẰNG DẤU X (sẽ làm mất dữ liệu lưu).")
-        print("4. Khi đã vào được khung chat thành công, hãy quay lại terminal này và nhấn phím ENTER.")
-        print("="*70 + "\n")
-        
-        input("👉 Nhấn ENTER ở đây sau khi bạn đã đăng nhập thành công và thấy khung chat: ")
-        
-        print("💾 Đang lưu dữ liệu phiên làm việc...")
-        await context.close()
-        
-        print("✅ Đã lưu phiên đăng nhập thành công vào thư mục ./deepseek_user_data!")
+from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
+
+
+async def run_login(profile: str, channel: Optional[str] = None, no_sandbox: bool = False):
+    profile_dir = Path(profile).expanduser().resolve()
+    profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with suppress(OSError):
+        profile_dir.chmod(0o700)
+
+    print(f"🚀 Khởi tạo trình duyệt để đăng nhập (profile={profile_dir})...")
+    async with async_playwright() as playwright:
+        launch_args = ["--disable-blink-features=AutomationControlled"]
+        if no_sandbox:
+            launch_args.append("--no-sandbox")
+        launch_options = {
+            "user_data_dir": str(profile_dir),
+            "headless": False,
+            "args": launch_args,
+        }
+        if channel:
+            launch_options["channel"] = channel
+
+        context = await playwright.chromium.launch_persistent_context(**launch_options)
+        try:
+            await Stealth().apply_stealth_async(context)
+            page = context.pages[0] if context.pages else await context.new_page()
+
+            print("🌐 Đang mở trang web DeepSeek...")
+            await page.goto(
+                os.environ.get("DEEPSEEK_CHAT_URL", "https://chat.deepseek.com"),
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            print(
+                "\n"
+                "1. Đăng nhập và giải Captcha nếu có.\n"
+                "2. Chờ đến khi nhìn thấy khung chat.\n"
+                "3. Quay lại terminal và nhấn ENTER; không tự đóng cửa sổ browser.\n"
+            )
+            await asyncio.to_thread(
+                input,
+                "👉 Nhấn ENTER sau khi đã đăng nhập thành công: ",
+            )
+            await page.wait_for_selector(
+                "textarea[placeholder='Message DeepSeek']",
+                state="visible",
+                timeout=10000,
+            )
+            print("💾 Đã xác nhận khung chat, đang lưu phiên...")
+        finally:
+            with suppress(Exception):
+                await context.close()
+
+    print(f"✅ Đã lưu phiên đăng nhập tại {profile_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Đăng nhập DeepSeek và lưu profile cục bộ.")
+    parser.add_argument("--profile", default="./deepseek_user_data")
+    parser.add_argument(
+        "--channel",
+        default=None,
+        help="Browser channel tùy chọn, ví dụ 'chrome'; mặc định dùng Chromium của Playwright.",
+    )
+    parser.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="Chỉ dùng trong container tin cậy khi Chromium không thể chạy sandbox.",
+    )
+    args = parser.parse_args()
+    asyncio.run(run_login(args.profile, args.channel, args.no_sandbox))
+
 
 if __name__ == "__main__":
-    asyncio.run(run_login())
+    main()

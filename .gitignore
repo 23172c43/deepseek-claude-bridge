@@ -10,7 +10,15 @@ venv/
 
 # Playwright & Browser Session
 deepseek_user_data/
+deepseek_user_data*/
 
 # Logs
 *.log
 server.log
+
+# Test, lint and packaging artifacts
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/

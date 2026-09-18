@@ -1,157 +1,151 @@
- # 🌉 DeepSeek ↔ Claude Code Bridge
+# DeepSeek ↔ Claude Code Bridge
 
-Chạy Claude Code CLI miễn phí bằng cách "mượn" não của DeepSeek Web Chat.
+Proxy cục bộ cung cấp một phần giao diện Anthropic Messages API cho Claude Code,
+nhưng xử lý yêu cầu bằng DeepSeek Web thông qua Playwright.
 
-Dự án này dựng một proxy tương thích Anthropic Messages API (/v1/messages), nhưng thay vì gọi Anthropic, nó điều khiển một trình duyệt Playwright đăng nhập sẵn vào chat.deepseek.com, gửi prompt vào khung chat, chờ DeepSeek trả lời, rồi dịch ngược câu trả lời thành định dạng Anthropic (text + tool_use). Nhờ vậy Claude Code CLI tưởng đang nói chuyện với Anthropic, nhưng thực chất là DeepSeek đang làm việc.
-✨ Tính năng
+> Đây là dự án không chính thức, không liên kết với Anthropic hoặc DeepSeek.
+> Tự động hóa giao diện web có thể không phù hợp với điều khoản của dịch vụ và có
+> thể ngừng hoạt động khi giao diện DeepSeek thay đổi.
 
-🔌 Tương thích Anthropic API — Hỗ trợ /v1/messages (cả stream và non-stream) và /v1/messages/count_tokens.
+## Đặc điểm
 
-🧠 Tool Calling — Dịch schema tool của Claude Code sang định dạng văn bản mà DeepSeek hiểu được, rồi parse ngược lại thành tool_use chuẩn Anthropic.
+- POST /v1/messages, hỗ trợ non-stream và SSE.
+- POST /v1/messages/count_tokens với số token ước lượng.
+- Chuyển tool schema và tool result giữa định dạng Anthropic và prompt văn bản.
+- Xác thực tool input bằng JSON Schema trước khi trả tool_use.
+- Mỗi request dựng lại đầy đủ system prompt và lịch sử, rồi mở một chat DeepSeek mới.
+- Các request được xếp hàng để không trộn nội dung trong cùng browser profile.
+- Kiểm tra phiên đăng nhập thật qua /health.
+- SSE mở ngay và gửi heartbeat trong lúc chờ DeepSeek.
 
-🛡️ Chống lỗi escape JSON — Tham số tool được truyền dưới dạng block thô thay vì nhồi vào JSON, tránh JSONDecodeError khi nội dung file chứa dấu ngoặc kép hoặc ký tự xuống dòng.
+SSE hiện là **buffered streaming**: kết nối được mở ngay, nhưng content delta chỉ
+được phát sau khi câu trả lời hoàn tất và tool call đã được xác thực. Đây không
+phải token streaming trực tiếp từ model.
 
-🔁 Tự động sửa lỗi định dạng — Nếu DeepSeek trả về tool call sai cú pháp, proxy tự động yêu cầu gửi lại một lần.
+## Yêu cầu
 
-🕵️ Stealth Mode — Dùng playwright_stealth để giảm khả năng bị phát hiện là bot.
+- Python 3.9 trở lên.
+- Claude Code CLI trong PATH.
+- Tài khoản DeepSeek.
 
-💾 Lưu phiên đăng nhập — Dùng persistent context, chỉ cần đăng nhập một lần.
+Google Chrome không bắt buộc. Mặc định cả login và server dùng Chromium do
+Playwright quản lý.
 
-📡 Streaming SSE — Trả lời theo chuẩn Server-Sent Events mà Claude Code CLI yêu cầu.
+## Cài đặt
 
-📁 Cấu trúc dự án
-text
-Copy
-Download
-.
-├── launcher.py              # Entry point: khởi động server + chạy Claude CLI
-├── login.py                 # Script đăng nhập DeepSeek thủ công (chạy 1 lần)
-├── requirements.txt         # Danh sách thư viện Python
-├── app/
-│   ├── __init__.py
-│   ├── browser.py           # BrowserBridge: điều khiển Playwright gửi/nhận tin nhắn
-│   └── server.py            # FastAPI: adapter Anthropic API ↔ DeepSeek
-└── deepseek_user_data/      # Dữ liệu phiên đăng nhập (tự sinh, đã gitignore)
-⚙️ Yêu cầu hệ thống
-
-Python ≥ 3.9
-
-Google Chrome đã cài đặt (Playwright dùng channel="chrome")
-
-Claude Code CLI đã cài (npm install -g @anthropic-ai/claude-code)
-
-Tài khoản DeepSeek (miễn phí)
-
-🚀 Cài đặt
-1. Cài thư viện Python
-bash
-Copy
-Download
+~~~bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-2. Đăng nhập DeepSeek (chỉ làm một lần)
-bash
-Copy
-Download
+~~~
+
+Để phát triển và chạy test:
+
+~~~bash
+pip install -r requirements-dev.txt
+pytest
+ruff check .
+~~~
+
+## Đăng nhập
+
+~~~bash
 python login.py
+~~~
 
-Script sẽ mở một cửa sổ Chrome. Bạn hãy:
+Sau khi đăng nhập và thấy khung chat, quay lại terminal rồi nhấn Enter. Profile
+mặc định được lưu ở ./deepseek_user_data với quyền thư mục hạn chế.
 
-Đăng nhập vào tài khoản DeepSeek.
+Có thể chọn profile hoặc dùng Chrome đã cài:
 
-Giải Captcha nếu có, chờ đến khi thấy khung chat.
+~~~bash
+python login.py --profile ./deepseek_user_data_2
+python login.py --channel chrome
+~~~
 
-KHÔNG đóng trình duyệt bằng dấu X (sẽ mất dữ liệu phiên).
+Không sao chép hoặc chia sẻ thư mục profile: nó chứa cookie đăng nhập.
 
-Quay lại terminal và nhấn ENTER.
+## Chạy
 
-Phiên đăng nhập sẽ được lưu vào ./deepseek_user_data/.
-
-3. Chạy
-bash
-Copy
-Download
+~~~bash
 python launcher.py
+~~~
 
-launcher.py sẽ:
+Launcher:
 
-Khởi động FastAPI server ở http://localhost:8000 (chạy nền, log ghi ra server.log).
+1. Kiểm tra port chưa bị process khác chiếm.
+2. Khởi động Uvicorn chỉ trên 127.0.0.1.
+3. Chờ browser thực sự sẵn sàng.
+4. Chạy Claude Code với ANTHROPIC_BASE_URL trỏ về bridge.
+5. Dừng và chờ server thoát khi Claude kết thúc.
 
-Chờ server sẵn sàng (tối đa 30 giây).
+Chạy nhiều launcher bằng port và profile riêng:
 
-Thiết lập biến môi trường ANTHROPIC_BASE_URL=http://localhost:8000.
+~~~bash
+python launcher.py --port 8001 --profile ./deepseek_user_data_2
+~~~
 
-Chạy claude CLI và chuyển toàn bộ traffic qua proxy.
+Log được nối thêm vào server_<port>.log, không ghi đè log cũ.
 
-🧩 Cách hoạt động
-text
-Copy
-Download
-Claude Code CLI
-      │  (Anthropic Messages API)
-      ▼
-┌─────────────────────┐
-│  FastAPI (server.py)│
-│  /v1/messages       │
-└─────────┬───────────┘
-          │  build_prompt() → văn bản thuần
-          ▼
-┌─────────────────────┐
-│ BrowserBridge       │
-│ (browser.py)        │
-│  Playwright + Stealth│
-└─────────┬───────────┘
-          │  gõ vào textarea, nhấn Enter, chờ ổn định
-          ▼
-   chat.deepseek.com
-          │
-          ▼  extract_tool_calls()
-┌─────────────────────┐
-│  Anthropic response │
-│  text + tool_use    │
-└─────────────────────┘
-Vì sao không nhồi tool call vào JSON?
+## Cấu hình
 
-Schema tool đầy đủ của Claude Code rất dài. Nếu bắt DeepSeek trả về JSON chứa nội dung file (có dấu ", \n, \), model rất dễ escape sai và gây JSONDecodeError.
+Các biến môi trường hỗ trợ:
 
-Giải pháp: dùng định dạng block tham số thô — nội dung được đặt nguyên văn, không cần escape. Parser trong server.py sẽ:
+| Biến | Mặc định | Ý nghĩa |
+|---|---:|---|
+| BRIDGE_API_KEY | rỗng | Nếu đặt, bắt buộc x-api-key hoặc Bearer token |
+| BROWSER_HEADLESS | 1 | Đặt 0 để hiện browser |
+| BROWSER_NO_SANDBOX | rỗng | Chỉ đặt 1 trong container tin cậy |
+| DEEPSEEK_CHAT_URL | https://chat.deepseek.com | URL giao diện chat |
+| RESPONSE_START_TIMEOUT | 30 | Giây chờ bubble phản hồi mới |
+| RESPONSE_COMPLETE_TIMEOUT | 120 | Giây chờ phản hồi hoàn tất |
+| RESPONSE_STABLE_SECONDS | 5 | Thời gian text phải ổn định |
+| MAX_REQUEST_BYTES | 2097152 | Kích thước JSON request tối đa |
 
-Tìm các block tool_call (đếm độ sâu lồng nhau để không bị nhầm với thẻ mẫu bên trong nội dung file).
+Ví dụ bật khóa cục bộ:
 
-Đọc tên tool và các tham số.
+~~~bash
+export BRIDGE_API_KEY='replace-with-a-random-local-secret'
+python launcher.py
+~~~
 
-Ép kiểu tham số theo input_schema (vì block thô trả về toàn string).
+Launcher tự chuyển khóa này thành ANTHROPIC_API_KEY cho Claude Code.
 
-Bỏ qua các tool call chỉ chứa giá trị placeholder (..., giá trị, v.v.).
+## Phạm vi tương thích
 
-Fallback sang JSON hoặc XML kiểu cũ nếu cần.
+Bridge phục vụ luồng Claude Code thông dụng, không phải bản triển khai đầy đủ của
+Anthropic API. model được phản chiếu trong response nhưng không chọn model trên
+DeepSeek Web. temperature và các tham số sampling khác không được giao diện web
+đảm bảo. max_tokens, stop_sequences và tool_choice chỉ được mô phỏng ở tầng
+adapter.
 
-📡 API Endpoints
-Method	Endpoint	Mô tả
-POST	/v1/messages	Endpoint chính, hỗ trợ stream + non-stream
-POST	/v1/messages/count_tokens	Ước lượng số token (xấp xỉ len/4)
-🐛 Xử lý sự cố
-Triệu chứng	Nguyên nhân & cách khắc phục
-❌ LỖI: Không tìm thấy khung chat	Phiên đăng nhập hết hạn. Chạy lại python login.py.
-❌ Lỗi: Server không thể khởi động sau 30s	Xem server.log. Thường do port 8000 đang bị chiếm.
-DeepSeek trả lời mãi không xong	Đã quá 20s chưa thấy bubble mới — có thể Enter chưa kích hoạt generate. Thử gửi lại.
-JSONDecodeError khi parse tool call	Đây chính là lý do dự án dùng định dạng block thô. Nếu vẫn gặp, mở issue kèm log.
-Bị DeepSeek chặn / captcha liên tục	Dùng tài khoản khác, giảm tần suất, hoặc chạy login.py lại để làm mới phiên.
-Chrome không mở được	Kiểm tra đã cài Google Chrome; Playwright dùng channel="chrome".
-⚠️ Lưu ý & Giới hạn
+Token được ước lượng theo số byte UTF-8; không nên dùng cho thanh toán hoặc giới
+hạn chính xác.
 
-Không chính thức: Đây là dự án tự chế, không liên kết với Anthropic hay DeepSeek.
+## Cấu trúc
 
-Có thể vi phạm ToS của DeepSeek nếu dùng để tự động hóa quá mức. Tự chịu trách nhiệm.
+~~~text
+.
+├── app/
+│   ├── browser.py       # Vòng đời Playwright và đọc phản hồi DeepSeek
+│   └── server.py        # Adapter HTTP, prompt, parser và SSE
+├── tests/               # Test hồi quy
+├── launcher.py          # Khởi động server và Claude Code
+├── login.py             # Tạo profile đăng nhập
+├── requirements.txt
+└── requirements-dev.txt
+~~~
 
-Không ổn định bằng API thật: Phụ thuộc vào giao diện web DeepSeek — khi DeepSeek đổi DOM (textarea[placeholder='Message DeepSeek'], .ds-assistant-message-main-content), proxy sẽ vỡ.
+## Giới hạn và an toàn
 
-Hiệu năng chậm: Mỗi request phải chờ DeepSeek gõ xong và ổn định 6 lần × 0.5s.
+- Selector DOM của DeepSeek vẫn có thể thay đổi.
+- Một browser xử lý tuần tự; request đồng thời sẽ phải chờ.
+- Không expose port ra mạng công cộng. Launcher cố định bind ở loopback.
+- Tool call là output không đáng tin cậy và chỉ được chuyển tiếp sau khi đúng tên
+  và đúng JSON Schema; vẫn nên giữ cơ chế xác nhận tool nguy hiểm của Claude Code.
+- Nếu cần độ ổn định production, hãy thay lớp Playwright bằng API model chính thức.
 
-Không có bảo mật: Server chạy localhost, không có auth. Đừng expose ra mạng ngoài.
+## Giấy phép
 
-Token đếm xấp xỉ (len(text) // 4) — chỉ để Claude Code không báo lỗi, không chính xác.
-
-📄 Giấy phép
-
-MIT — dùng tùy ý, tự chịu rủi ro.
+MIT, xem [LICENSE](LICENSE).
