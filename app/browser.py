@@ -92,29 +92,58 @@ class BrowserBridge:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_ms / 1000
         try:
-            chat_input = await self.page.wait_for_selector(
-                self.CHAT_INPUT_SELECTOR,
-                state="visible",
-                timeout=timeout_ms,
-            )
-            while loop.time() < deadline:
+            # Locator resolves the current DOM node for every action. DeepSeek's
+            # React UI can replace the textarea after hydration, which makes an
+            # ElementHandle returned by wait_for_selector() stale.
+            chat_input = self.page.locator(self.CHAT_INPUT_SELECTOR).first
+            await chat_input.wait_for(state="visible", timeout=timeout_ms)
+            while True:
                 try:
                     if await chat_input.is_editable():
                         return chat_input
                 except PlaywrightError:
-                    # DeepSeek can replace the textarea while hydrating the page.
-                    remaining_ms = max(int((deadline - loop.time()) * 1000), 1)
-                    chat_input = await self.page.wait_for_selector(
-                        self.CHAT_INPUT_SELECTOR,
-                        state="visible",
-                        timeout=min(remaining_ms, 1000),
-                    )
-                await asyncio.sleep(0.1)
+                    pass
+                if loop.time() >= deadline:
+                    break
+                await asyncio.sleep(min(0.1, max(deadline - loop.time(), 0)))
             raise PlaywrightTimeoutError("DeepSeek chat input is not editable.")
         except PlaywrightTimeoutError as exc:
             self._mark_input_unavailable("DeepSeek chat input is unavailable.")
             self.last_error = "Không tìm thấy khung chat; phiên đăng nhập có thể đã hết hạn."
             raise BrowserInputUnavailableError(self.last_error) from exc
+
+    async def _fill_chat_input(self, chat_input, message: str):
+        """Fill React's textarea, falling back when normal actionability stalls."""
+        try:
+            await chat_input.fill(message, timeout=self.INPUT_ACTION_TIMEOUT_MS)
+            return
+        except (PlaywrightTimeoutError, PlaywrightError):
+            print("⚠️ fill() không thành công; thử cập nhật textarea qua sự kiện input...")
+
+        try:
+            await chat_input.evaluate(
+                """(element, value) => {
+                    const descriptor = Object.getOwnPropertyDescriptor(
+                        HTMLTextAreaElement.prototype,
+                        "value"
+                    );
+                    if (!descriptor || !descriptor.set) {
+                        throw new Error("Không tìm thấy native textarea value setter");
+                    }
+                    descriptor.set.call(element, value);
+                    element.dispatchEvent(new Event("input", { bubbles: true }));
+                    element.focus();
+                }""",
+                message,
+            )
+            if await chat_input.input_value() != message:
+                raise BrowserInputUnavailableError(
+                    "DeepSeek không ghi nhận nội dung sau phương án nhập dự phòng."
+                )
+        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+            raise BrowserInputUnavailableError(
+                "Không thể cập nhật ô chat DeepSeek bằng phương án nhập dự phòng."
+            ) from exc
 
     async def initialize(self):
         print("Khởi động Playwright ẩn...")
@@ -157,11 +186,8 @@ class BrowserBridge:
         if not self.page or self.page.is_closed():
             return False
         try:
-            chat_input = await self.page.wait_for_selector(
-                self.CHAT_INPUT_SELECTOR,
-                state="visible",
-                timeout=timeout_ms,
-            )
+            chat_input = self.page.locator(self.CHAT_INPUT_SELECTOR).first
+            await chat_input.wait_for(state="visible", timeout=timeout_ms)
             if not await chat_input.is_editable():
                 self._mark_input_unavailable("DeepSeek chat input is not editable.")
                 return False
@@ -237,9 +263,9 @@ class BrowserBridge:
         baseline_text = await old_responses[-1].inner_text() if old_responses else None
 
         try:
-            await chat_input.fill(message, timeout=self.INPUT_ACTION_TIMEOUT_MS)
+            await self._fill_chat_input(chat_input, message)
             await chat_input.press("Enter", timeout=self.INPUT_ACTION_TIMEOUT_MS)
-        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+        except (BrowserInputUnavailableError, PlaywrightTimeoutError, PlaywrightError) as exc:
             error_message = (
                 "DeepSeek không cho phép nhập hoặc gửi tin nhắn trong thời gian chờ; "
                 "hãy kiểm tra phiên đăng nhập và giao diện web."

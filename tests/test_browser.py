@@ -4,6 +4,7 @@ from app.browser import (
     BrowserBridge,
     BrowserInputUnavailableError,
     BrowserResponseTimeout,
+    PlaywrightError,
 )
 
 
@@ -11,6 +12,15 @@ class FakeElement:
     def __init__(self, text, editable=True):
         self.text = text
         self.editable = editable
+        self.fill_error = None
+        self.native_fill_used = False
+
+    @property
+    def first(self):
+        return self
+
+    async def wait_for(self, **kwargs):
+        return None
 
     async def inner_text(self):
         return self.text
@@ -19,7 +29,16 @@ class FakeElement:
         return self.editable
 
     async def fill(self, value, **kwargs):
+        if self.fill_error:
+            raise self.fill_error
         self.text = value
+
+    async def evaluate(self, expression, value):
+        self.native_fill_used = True
+        self.text = value
+
+    async def input_value(self):
+        return self.text
 
     async def press(self, key, **kwargs):
         return None
@@ -33,7 +52,7 @@ class FakePage:
     def is_closed(self):
         return False
 
-    async def wait_for_selector(self, selector, **kwargs):
+    def locator(self, selector):
         return self.input
 
     async def query_selector_all(self, selector):
@@ -91,6 +110,20 @@ def test_non_editable_input_starts_cooldown():
             assert bridge.cooldown_error()
             return
         raise AssertionError("Expected BrowserInputUnavailableError")
+
+    asyncio.run(run())
+
+
+def test_native_setter_fallback_after_fill_failure():
+    async def run():
+        bridge = BrowserBridge("./unused-test-profile")
+        chat_input = FakeElement("")
+        chat_input.fill_error = PlaywrightError("textarea was replaced")
+
+        await bridge._fill_chat_input(chat_input, "hello from fallback")
+
+        assert chat_input.text == "hello from fallback"
+        assert chat_input.native_fill_used is True
 
     asyncio.run(run())
 
