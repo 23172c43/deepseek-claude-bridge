@@ -2,6 +2,7 @@ import json
 import uuid
 import re
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
@@ -9,7 +10,10 @@ from fastapi.responses import StreamingResponse
 
 from app.browser import BrowserBridge
 
-bridge = BrowserBridge()
+# Mỗi phiên launcher.py set biến này trỏ tới profile Chromium riêng, để chạy
+# nhiều cửa sổ Claude Code song song mà không bị trộn hội thoại DeepSeek.
+_PROFILE_DIR = os.environ.get("DEEPSEEK_PROFILE_DIR", "./deepseek_user_data")
+bridge = BrowserBridge(user_data_dir=_PROFILE_DIR)
 
 
 @asynccontextmanager
@@ -24,12 +28,6 @@ app = FastAPI(lifespan=lifespan)
 
 # ==========================================================
 # HƯỚNG DẪN GỌI TOOL
-# ----------------------------------------------------------
-# Điểm mấu chốt: KHÔNG bắt DeepSeek nhét nội dung file vào
-# trong JSON. Nội dung file luôn có dấu ", xuống dòng, \n,
-# backslash... -> model escape sai -> JSONDecodeError.
-# Thay vào đó: tham số nằm trong block <param>, nội dung THÔ,
-# không cần escape gì hết.
 # ==========================================================
 TOOL_INSTRUCTION = """\
 QUY TẮC GỌI TOOL (BẮT BUỘC TUÂN THỦ TUYỆT ĐỐI):
@@ -78,7 +76,6 @@ Tool hợp lệ: {tool_names}
 # BUILD PROMPT
 # ==========================================================
 def _normalize_system(system) -> str:
-    """Claude Code gửi system dạng str HOẶC list[{type,text}]."""
     if isinstance(system, list):
         return "\n".join(
             b.get("text", "") for b in system if isinstance(b, dict) and b.get("type") == "text"
@@ -87,10 +84,6 @@ def _normalize_system(system) -> str:
 
 
 def compact_tools(tools) -> str:
-    """
-    Nén schema tool lại cho gọn. Schema đầy đủ của Claude Code dài hàng chục KB,
-    nhồi nguyên si vào ô chat DeepSeek sẽ bị cắt / làm model loạn.
-    """
     lines = []
     for t in tools:
         if not isinstance(t, dict) or "name" not in t:
@@ -126,9 +119,7 @@ def build_prompt(messages, tools, system_prompt, is_first_turn: bool) -> str:
                         c.get("text", "") for c in content if isinstance(c, dict)
                     )
                 status = "LỖI" if block.get("is_error") else "OK"
-                current_turn_content += (
-                    f"\n[KẾT QUẢ TOOL ({status})]:\n{content}\n"
-                )
+                current_turn_content += f"\n[KẾT QUẢ TOOL ({status})]:\n{content}\n"
             elif btype == "tool_use":
                 current_turn_content += (
                     f"\n[BẠN VỪA GỌI TOOL '{block.get('name')}' VỚI INPUT: "
@@ -160,7 +151,7 @@ def build_prompt(messages, tools, system_prompt, is_first_turn: bool) -> str:
 
 
 # ==========================================================
-# PARSER
+# PARSER  (mỗi hàm chỉ định nghĩa ĐÚNG MỘT LẦN ở đây)
 # ==========================================================
 OPEN_TAG = "<tool_call>"
 CLOSE_TAG = "</tool_call>"
@@ -171,9 +162,40 @@ NAME_RE = re.compile(
 )
 PLACEHOLDER_VALUES = {"...", "…", "<giá trị>", "giá trị", "value", "gia tri"}
 
+# Token đặc biệt của DeepSeek: ｜ là U+FF5C, ▁ là U+2581 — không phải ASCII.
+_JUNK_MARKER = re.compile(r"[｜|]{1,2}\s*(?:DSML|tool[▁_ ]?calls?)\s*[｜|]{1,2}\s*", re.IGNORECASE)
+_NS_PREFIX = re.compile(r"(?<=<)\s*(?:/\s*)?(?:antml|anthropic|ds)\s*:\s*", re.IGNORECASE)
+
+
+def _normalize_tool_syntax(text: str) -> str:
+    """
+    DeepSeek hay trôi về định dạng function-call gốc của nó:
+        <｜｜DSML｜｜ calls> / <｜｜DSML｜｜ invoke name="Read"> / <｜｜DSML｜｜ parameter ...>
+    Dịch về <tool_call>/<param> trước khi parse.
+    """
+    if not text:
+        return ""
+
+    s = _JUNK_MARKER.sub("", text)
+    s = _NS_PREFIX.sub("", s)
+
+    s = re.sub(r"<\s*parameter\s+name\s*=\s*\"([^\"]+)\"\s*>", r'<param name="\1">', s, flags=re.I)
+    s = re.sub(r"<\s*/\s*parameter\s*>", "</param>", s, flags=re.I)
+
+    s = re.sub(
+        r"<\s*invoke\s+name\s*=\s*\"([^\"]+)\"\s*>",
+        lambda m: f"{OPEN_TAG}\nname: {m.group(1)}\n",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(r"<\s*/\s*(?:invoke|call|tool_use|function_call)\s*>", CLOSE_TAG, s, flags=re.I)
+    s = re.sub(r"<\s*/?\s*(?:calls|tool_calls|function_calls)\s*>", "", s, flags=re.I)
+    s = re.sub(r"<\s*(?:tool_use|function_call)\s*>", OPEN_TAG, s, flags=re.I)
+
+    return s
+
 
 def _strip_fences_around_tags(text: str) -> str:
-    """Chỉ gỡ code fence NẰM SÁT thẻ tool_call, không đụng vào fence trong nội dung file."""
     text = re.sub(r"```[a-zA-Z]*\s*\n?(?=<tool_call>)", "", text)
     text = re.sub(r"(?<=</tool_call>)\s*\n?```", "", text)
     return text
@@ -181,21 +203,19 @@ def _strip_fences_around_tags(text: str) -> str:
 
 def _find_blocks(text: str):
     """
-    Tìm các khối <tool_call>...</tool_call>, ĐẾM ĐỘ SÂU LỒNG NHAU.
-    Bản cũ dùng find() lấy </tool_call> đầu tiên -> nếu nội dung file có chứa
-    thẻ tool_call mẫu (đúng trường hợp viết README) là parse loạn ngay.
+    Đếm độ sâu lồng nhau + TỰ ĐÓNG block khi DeepSeek quên </tool_call>
+    (cắt tại <tool_call> kế tiếp, hoặc hết chuỗi).
     """
     blocks = []
-    i = 0
-    n = len(text)
+    i, n = 0, len(text)
     while i < n:
         start = text.find(OPEN_TAG, i)
         if start == -1:
             break
+        body_start = start + len(OPEN_TAG)
         depth = 1
-        j = start + len(OPEN_TAG)
-        body_start = j
-        found = False
+        j = body_start
+        closed = False
         while j < n:
             nxt_open = text.find(OPEN_TAG, j)
             nxt_close = text.find(CLOSE_TAG, j)
@@ -209,10 +229,21 @@ def _find_blocks(text: str):
                 if depth == 0:
                     blocks.append((start, nxt_close + len(CLOSE_TAG), text[body_start:nxt_close]))
                     j = nxt_close + len(CLOSE_TAG)
-                    found = True
+                    closed = True
                     break
                 j = nxt_close + len(CLOSE_TAG)
-        i = j if found else start + len(OPEN_TAG)
+
+        if closed:
+            i = j
+            continue
+
+        nxt_open = text.find(OPEN_TAG, body_start)
+        end = nxt_open if nxt_open != -1 else n
+        body = text[body_start:end]
+        if PARAM_RE.search(body) or re.search(r"^\s*name\s*:", body, re.MULTILINE):
+            blocks.append((start, end, body))
+        i = end if end > start else start + len(OPEN_TAG)
+
     return blocks
 
 
@@ -234,18 +265,20 @@ def _parse_param_blocks(body: str):
         seg = body[seg_start:seg_end]
         close = seg.rfind("</param>")
         value = seg[:close] if close != -1 else seg
-        # chỉ bỏ đúng 1 newline đầu/cuối do format, giữ nguyên phần còn lại
-        value = value[1:] if value.startswith("\n") else value
-        value = value[:-1] if value.endswith("\n") else value
+
+        if "\n" in value.strip():
+            # nhiều dòng = nội dung file -> giữ NGUYÊN VĂN
+            value = value[1:] if value.startswith("\n") else value
+            value = value[:-1] if value.endswith("\n") else value
+        else:
+            # một dòng = path/pattern/command -> phải trim
+            value = value.strip()
+
         out[m.group(1)] = value
     return out
 
 
 def _repair_json(s: str) -> str:
-    """
-    Sửa JSON do model sinh ra: escape dấu " lạc và ký tự xuống dòng nằm trong string.
-    Xử lý đúng ca lỗi "Expecting ',' delimiter" khi content chứa «nói chuyện».
-    """
     out = []
     in_str = False
     esc = False
@@ -344,10 +377,6 @@ def _looks_like_placeholder(tool_input: dict) -> bool:
 
 
 def coerce_types(tool_input: dict, schema: dict) -> dict:
-    """
-    Param block trả về toàn string. Claude Code validate theo input_schema,
-    sai kiểu là tool fail ngay (vd: limit phải int, todos phải array).
-    """
     props = (schema or {}).get("properties") or {}
     out = {}
     for k, v in (tool_input or {}).items():
@@ -366,17 +395,13 @@ def coerce_types(tool_input: dict, schema: dict) -> dict:
             elif t in ("array", "object"):
                 out[k] = json.loads(s)
             else:
-                out[k] = v  # string: giữ NGUYÊN VĂN, không strip
+                out[k] = v
         except Exception:
             out[k] = v
     return out
 
 
 def extract_tool_calls(raw_reply: str, tools: list):
-    """
-    Trả về (text_content, [{"name":..., "input":...}, ...]).
-    Thứ tự ưu tiên parse: <param> block -> JSON (+ tự sửa) -> XML kiểu cũ.
-    """
     valid_tool_names = [t.get("name") for t in tools if isinstance(t, dict) and "name" in t]
     schema_by_name = {
         t["name"]: (t.get("input_schema") or {})
@@ -384,12 +409,11 @@ def extract_tool_calls(raw_reply: str, tools: list):
         if isinstance(t, dict) and "name" in t
     }
 
-    cleaned = _strip_fences_around_tags(raw_reply or "")
+    cleaned = _strip_fences_around_tags(_normalize_tool_syntax(raw_reply or ""))
     tool_calls = []
     spans = []
 
     for start, end, body in _find_blocks(cleaned):
-        # 1. tên tool: lấy từ dòng "name: X" hoặc <name>X</name>
         head = body.split("<param", 1)[0].split("{", 1)[0]
         matched = None
         for m in NAME_RE.finditer(head):
@@ -399,12 +423,10 @@ def extract_tool_calls(raw_reply: str, tools: list):
 
         tool_input = None
 
-        # 2. tham số kiểu <param name="...">
         params = _parse_param_blocks(body)
         if params is not None and matched:
             tool_input = coerce_types(params, schema_by_name.get(matched, {}))
 
-        # 3. fallback JSON
         if tool_input is None:
             data = _parse_json_body(body)
             if isinstance(data, dict):
@@ -421,14 +443,11 @@ def extract_tool_calls(raw_reply: str, tools: list):
                         }
                     tool_input = coerce_types(ti, schema_by_name.get(matched, {}))
 
-        # 4. fallback XML kiểu cũ
         if tool_input is None and matched:
             legacy = _parse_legacy_xml(body)
             if legacy is not None:
                 tool_input = coerce_types(legacy, schema_by_name.get(matched, {}))
 
-        # Không khớp tool hợp lệ -> gần như chắc chắn là model nhại lại hướng dẫn
-        # hoặc là nội dung file có thẻ mẫu. Bỏ im lặng, không spam log.
         if not matched or tool_input is None:
             spans.append((start, end))
             continue
@@ -452,6 +471,16 @@ def extract_tool_calls(raw_reply: str, tools: list):
 # ==========================================================
 # ENDPOINTS
 # ==========================================================
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "bridge": "deepseek-claude-agent",
+        "browser_ready": bridge.page is not None,
+        "profile_dir": _PROFILE_DIR,
+    }
+
+
 @app.post("/v1/messages/count_tokens")
 async def count_tokens(request: Request):
     body = await request.json()
@@ -470,7 +499,10 @@ async def anthropic_adapter(request: Request):
 
     tools = [t for t in body.get("tools", []) if isinstance(t, dict) and "name" in t]
     system_prompt = _normalize_system(body.get("system", ""))
-    is_first_turn = len(messages) == 1
+    # Không dùng len(messages) == 1: sai khi Claude Code gửi kèm system riêng
+    # hoặc khi lịch sử bị compact. Turn đầu thật sự = chưa có message nào
+    # role="assistant" trong lịch sử.
+    is_first_turn = not any(m.get("role") == "assistant" for m in messages)
 
     prompt_to_send = build_prompt(messages, tools, system_prompt, is_first_turn)
 
@@ -479,7 +511,6 @@ async def anthropic_adapter(request: Request):
 
     text_content, tool_calls = extract_tool_calls(ds_reply, tools)
 
-    # Có thẻ tool_call nhưng parse không ra tool nào -> xin model gửi lại 1 lần
     if tools and not tool_calls and OPEN_TAG in (ds_reply or ""):
         print("🔁 Format sai, yêu cầu DeepSeek gửi lại tool call...")
         names = ", ".join(t["name"] for t in tools)
@@ -499,7 +530,6 @@ async def anthropic_adapter(request: Request):
 
     out_tokens = max(len(text_content) // 4, 1)
 
-    # ---------------- NON-STREAM ----------------
     if not is_stream:
         content_blocks = []
         if text_content:
@@ -524,7 +554,6 @@ async def anthropic_adapter(request: Request):
             "usage": {"input_tokens": len(prompt_to_send) // 4, "output_tokens": out_tokens},
         }
 
-    # ---------------- STREAM (SSE cho Claude Code CLI) ----------------
     async def event_generator():
         msg_id = f"msg_{uuid.uuid4().hex[:24]}"
 
@@ -562,7 +591,6 @@ async def anthropic_adapter(request: Request):
                 "content_block": {"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": {}},
             })
             payload = json.dumps(tc["input"], ensure_ascii=False)
-            # chia nhỏ input_json_delta: payload lớn (nội dung file) dễ bị nghẽn nếu bắn 1 phát
             for i in range(0, len(payload), 512):
                 yield sse("content_block_delta", {
                     "type": "content_block_delta", "index": block_idx,
