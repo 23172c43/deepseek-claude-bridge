@@ -870,9 +870,8 @@ async def anthropic_adapter(request: Request):
         task = asyncio.create_task(_process_request(body))
         try:
             while not task.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=10)
-                except asyncio.TimeoutError:
+                done, _ = await asyncio.wait({task}, timeout=10)
+                if task not in done:
                     yield ": ping\n\n"
             result = await task
         except asyncio.CancelledError:

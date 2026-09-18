@@ -121,26 +121,39 @@ class BrowserBridge:
             print("⚠️ fill() không thành công; thử cập nhật textarea qua sự kiện input...")
 
         try:
-            await chat_input.evaluate(
-                """(element, value) => {
-                    const descriptor = Object.getOwnPropertyDescriptor(
-                        HTMLTextAreaElement.prototype,
-                        "value"
-                    );
-                    if (!descriptor || !descriptor.set) {
-                        throw new Error("Không tìm thấy native textarea value setter");
-                    }
-                    descriptor.set.call(element, value);
-                    element.dispatchEvent(new Event("input", { bubbles: true }));
-                    element.focus();
-                }""",
-                message,
+            if await chat_input.count() == 0:
+                raise BrowserInputUnavailableError(
+                    "Ô chat DeepSeek đã biến mất trước khi nhập nội dung."
+                )
+        except PlaywrightError as exc:
+            raise BrowserInputUnavailableError(
+                "Không thể kiểm tra lại ô chat DeepSeek."
+            ) from exc
+
+        try:
+            await asyncio.wait_for(
+                chat_input.evaluate(
+                    """(element, value) => {
+                        const descriptor = Object.getOwnPropertyDescriptor(
+                            HTMLTextAreaElement.prototype,
+                            "value"
+                        );
+                        if (!descriptor || !descriptor.set) {
+                            throw new Error("Không tìm thấy native textarea value setter");
+                        }
+                        descriptor.set.call(element, value);
+                        element.dispatchEvent(new Event("input", { bubbles: true }));
+                        element.focus();
+                    }""",
+                    message,
+                ),
+                timeout=max(self.INPUT_ACTION_TIMEOUT_MS / 1000, 0.1),
             )
             if await chat_input.input_value() != message:
                 raise BrowserInputUnavailableError(
                     "DeepSeek không ghi nhận nội dung sau phương án nhập dự phòng."
                 )
-        except (PlaywrightTimeoutError, PlaywrightError) as exc:
+        except (asyncio.TimeoutError, PlaywrightTimeoutError, PlaywrightError) as exc:
             raise BrowserInputUnavailableError(
                 "Không thể cập nhật ô chat DeepSeek bằng phương án nhập dự phòng."
             ) from exc
@@ -257,21 +270,36 @@ class BrowserBridge:
         if self._request_count % self.DEEPTHINK_RECHECK_EVERY == 0:
             await self.ensure_deepthink_enabled()
 
-        chat_input = await self._wait_for_chat_input()
-        old_responses = await self.page.query_selector_all(self.RESPONSE_SELECTOR)
-        old_count = len(old_responses)
-        baseline_text = await old_responses[-1].inner_text() if old_responses else None
+        input_error = None
+        for attempt in range(2):
+            chat_input = await self._wait_for_chat_input()
+            old_responses = await self.page.query_selector_all(self.RESPONSE_SELECTOR)
+            old_count = len(old_responses)
+            baseline_text = await old_responses[-1].inner_text() if old_responses else None
+            try:
+                await self._fill_chat_input(chat_input, message)
+                await chat_input.press("Enter", timeout=self.INPUT_ACTION_TIMEOUT_MS)
+            except (BrowserInputUnavailableError, PlaywrightTimeoutError, PlaywrightError) as exc:
+                input_error = exc
+                if attempt == 0:
+                    print("🔄 Ô chat thay đổi trạng thái; tải lại DeepSeek và thử gửi một lần...")
+                    try:
+                        await self.start_new_conversation()
+                    except BrowserBridgeError as recovery_exc:
+                        input_error = recovery_exc
+                        break
+                    continue
+                break
+            input_error = None
+            break
 
-        try:
-            await self._fill_chat_input(chat_input, message)
-            await chat_input.press("Enter", timeout=self.INPUT_ACTION_TIMEOUT_MS)
-        except (BrowserInputUnavailableError, PlaywrightTimeoutError, PlaywrightError) as exc:
+        if input_error is not None:
             error_message = (
                 "DeepSeek không cho phép nhập hoặc gửi tin nhắn trong thời gian chờ; "
                 "hãy kiểm tra phiên đăng nhập và giao diện web."
             )
             self._mark_input_unavailable(error_message)
-            raise BrowserInputUnavailableError(error_message) from exc
+            raise BrowserInputUnavailableError(error_message) from input_error
         print("⏳ Đang đợi DeepSeek bắt đầu trả lời...")
 
         loop = asyncio.get_running_loop()

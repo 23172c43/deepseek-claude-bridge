@@ -14,6 +14,7 @@ class FakeElement:
         self.editable = editable
         self.fill_error = None
         self.native_fill_used = False
+        self.present = True
 
     @property
     def first(self):
@@ -39,6 +40,9 @@ class FakeElement:
 
     async def input_value(self):
         return self.text
+
+    async def count(self):
+        return int(self.present)
 
     async def press(self, key, **kwargs):
         return None
@@ -124,6 +128,53 @@ def test_native_setter_fallback_after_fill_failure():
 
         assert chat_input.text == "hello from fallback"
         assert chat_input.native_fill_used is True
+
+    asyncio.run(run())
+
+
+def test_missing_input_skips_slow_native_fallback():
+    async def run():
+        bridge = BrowserBridge("./unused-test-profile")
+        chat_input = FakeElement("")
+        chat_input.fill_error = PlaywrightError("textarea disappeared")
+        chat_input.present = False
+
+        try:
+            await bridge._fill_chat_input(chat_input, "hello")
+        except BrowserInputUnavailableError:
+            assert chat_input.native_fill_used is False
+            return
+        raise AssertionError("Expected BrowserInputUnavailableError")
+
+    asyncio.run(run())
+
+
+def test_send_reloads_once_when_input_disappears_before_fill():
+    async def run():
+        bridge = BrowserBridge("./unused-test-profile")
+        page = FakePage()
+        page.input.fill_error = PlaywrightError("textarea disappeared")
+        page.input.present = False
+        bridge.page = page
+        bridge.ready = True
+        bridge.RESPONSE_START_TIMEOUT = 0.01
+        reloads = 0
+
+        async def reload_chat():
+            nonlocal reloads
+            reloads += 1
+            page.input = FakeElement("")
+
+        bridge.start_new_conversation = reload_chat
+
+        async with bridge.conversation(reset=False):
+            try:
+                await bridge.send_message_to_deepseek("hello")
+            except BrowserResponseTimeout:
+                pass
+
+        assert reloads == 1
+        assert page.input.text == "hello"
 
     asyncio.run(run())
 
